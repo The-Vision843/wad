@@ -1,0 +1,220 @@
+import React, { useState } from "react";
+import { MapContainer, TileLayer, Marker, Circle, useMapEvents } from "react-leaflet";
+import L from "leaflet";
+import * as turf from "@turf/turf";
+
+// NOTE / SAFETY
+// This demo app is for educational / fictional visualization only. It does NOT provide
+// detailed real-world blast physics or instructions for building weapons. All calculations
+// here are deliberately simplified and approximate. Do NOT use for operational planning.
+
+// Usage: drop this file into a React environment (Vite/CRA) with these deps installed:
+// react, react-dom, react-leaflet, leaflet, @turf/turf, file-saver
+
+// Quick install (example):
+// npm install react react-dom react-leaflet leaflet @turf/turf file-saver
+
+import "leaflet/dist/leaflet.css";
+
+const DefaultIcon = L.icon({
+  iconUrl:
+    "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png",
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+});
+L.Marker.prototype.options.icon = DefaultIcon;
+
+function ClickLocation({ onClick }) {
+  useMapEvents({
+    click(e) {
+      onClick(e.latlng);
+    },
+  });
+  return null;
+}
+
+export default function NukeSimApp() {
+  const [pos, setPos] = useState({ lat: 51.5074, lng: -0.1278 }); // default: London
+  const [yieldKt, setYieldKt] = useState(15); // kilotons
+  const [presetScale, setPresetScale] = useState("demo");
+  const [popDensity, setPopDensity] = useState(1000); // people per km^2 (user can adjust)
+
+  // Simplified ring model: radii scale with yield^(1/3)
+  // We do NOT supply classified or operational formulas. These coefficients are chosen
+  // to create plausible-looking rings for demonstration and are NOT authoritative.
+  const scaleFactors = {
+    demo: { fireball: 0.02, severe: 0.6, moderate: 1.2, light: 2.5 },
+    conservative: { fireball: 0.01, severe: 0.4, moderate: 0.9, light: 1.8 },
+    extreme: { fireball: 0.03, severe: 0.9, moderate: 1.8, light: 3.5 },
+  };
+
+  const sf = scaleFactors[presetScale] || scaleFactors.demo;
+  const cubeRoot = Math.cbrt(yieldKt);
+  const radiiKm = {
+    fireball: sf.fireball * cubeRoot,
+    severe: sf.severe * cubeRoot,
+    moderate: sf.moderate * cubeRoot,
+    light: sf.light * cubeRoot,
+  };
+
+  // Estimate casualties by area * density * severity modifiers (very rough)
+  const areaKm2 = (r) => Math.PI * r * r; // area in km^2 for radius r (km)
+  const severityFactor = { fireball: 1.0, severe: 0.8, moderate: 0.4, light: 0.15 };
+
+  const estimates = Object.fromEntries(
+    Object.entries(radiiKm).map(([k, r]) => {
+      const area = areaKm2(r);
+      const population = area * popDensity;
+      // fatalities assumed: population * severityFactor * arbitrary lethality coefficient
+      const lethality = { fireball: 0.95, severe: 0.6, moderate: 0.2, light: 0.05 };
+      const fatal = Math.round(population * lethality[k]);
+      const injured = Math.round(population * (severityFactor[k] - lethality[k] > 0 ? severityFactor[k] - lethality[k] : 0));
+      return [k, { r, area, population: Math.round(population), fatal, injured }];
+    })
+  );
+
+  function downloadGeoJSON() {
+    const features = [];
+    Object.entries(radiiKm).forEach(([k, r]) => {
+      const circle = turf.circle([pos.lng, pos.lat], r, { units: "kilometers", steps: 128 });
+      features.push(
+        turf.feature(circle.geometry, {
+          name: k,
+          radius_km: r,
+          area_km2: Math.round(Math.PI * r * r * 100) / 100,
+        })
+      );
+    });
+    const geo = turf.featureCollection(features);
+    const blob = new Blob([JSON.stringify(geo)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `nukesim_${Date.now()}.geojson`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function downloadReport() {
+    const rows = [
+      ["ring","radius_km","area_km2","estimated_population","estimated_fatalities","estimated_injured"],
+    ];
+    Object.entries(estimates).forEach(([k, v]) => {
+      rows.push([k, v.r.toFixed(3), v.area.toFixed(3), v.population, v.fatal, v.injured]);
+    });
+    const csv = rows.map((r) => r.join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `nukesim_report_${Date.now()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      <header className="p-4 bg-gray-800 text-white">
+        <h1 className="text-xl font-bold">NukeSim — Educational blast visualizer (demo)</h1>
+        <p className="text-sm opacity-80">Click a point on the map to pick a detonation location.</p>
+      </header>
+
+      <main className="flex-1 flex gap-4 p-4">
+        <section style={{ flex: 1 }}>
+          <MapContainer center={[pos.lat, pos.lng]} zoom={6} style={{ height: "70vh" }}>
+            <TileLayer
+              attribution='© OpenStreetMap contributors'
+              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            />
+            <ClickLocation
+              onClick={(latlng) => {
+                setPos(latlng);
+              }}
+            />
+            <Marker position={[pos.lat, pos.lng]} />
+            {/* Draw rings */}
+            <Circle center={[pos.lat, pos.lng]} radius={radiiKm.fireball * 1000} pathOptions={{ color: "black", opacity: 0.25 }} />
+            <Circle center={[pos.lat, pos.lng]} radius={radiiKm.severe * 1000} pathOptions={{ color: "red", opacity: 0.35 }} />
+            <Circle center={[pos.lat, pos.lng]} radius={radiiKm.moderate * 1000} pathOptions={{ color: "orange", opacity: 0.25 }} />
+            <Circle center={[pos.lat, pos.lng]} radius={radiiKm.light * 1000} pathOptions={{ color: "yellow", opacity: 0.15 }} />
+          </MapContainer>
+
+          <div className="mt-2 space-x-2">
+            <button onClick={downloadGeoJSON} className="px-3 py-1 bg-blue-600 text-white rounded">Download GeoJSON</button>
+            <button onClick={downloadReport} className="px-3 py-1 bg-green-600 text-white rounded">Download CSV report</button>
+          </div>
+        </section>
+
+        <aside style={{ width: 360 }} className="bg-white p-4 rounded shadow">
+          <h2 className="font-semibold">Parameters</h2>
+          <div className="mt-2">
+            <label className="block text-sm">Yield (kilotons)</label>
+            <input
+              type="range"
+              min={0.1}
+              max={10000}
+              step={0.1}
+              value={yieldKt}
+              onChange={(e) => setYieldKt(Number(e.target.value))}
+            />
+            <div className="text-sm">{yieldKt} kt</div>
+          </div>
+
+          <div className="mt-2">
+            <label className="block text-sm">Preset scale (demo only)</label>
+            <select value={presetScale} onChange={(e) => setPresetScale(e.target.value)}>
+              <option value="demo">Demo (default)</option>
+              <option value="conservative">Conservative</option>
+              <option value="extreme">Extreme</option>
+            </select>
+          </div>
+
+          <div className="mt-2">
+            <label className="block text-sm">Assumed population density (people / km²)</label>
+            <input type="number" value={popDensity} onChange={(e) => setPopDensity(Number(e.target.value))} />
+            <div className="text-xs opacity-70">Tip: connect a real population raster or API for realistic numbers.</div>
+          </div>
+
+          <div className="mt-4">
+            <h3 className="font-semibold">Estimates (very rough)</h3>
+            <table className="text-sm mt-2 w-full table-fixed">
+              <thead>
+                <tr>
+                  <th className="text-left">Ring</th>
+                  <th className="text-right">Radius (km)</th>
+                  <th className="text-right">Pop est.</th>
+                  <th className="text-right">Fatal</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(estimates).map(([k, v]) => (
+                  <tr key={k}>
+                    <td>{k}</td>
+                    <td className="text-right">{v.r.toFixed(3)}</td>
+                    <td className="text-right">{v.population.toLocaleString()}</td>
+                    <td className="text-right">{v.fatal.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <div className="mt-2 text-xs opacity-75">
+              <strong>Important:</strong> This is a simplified educational simulation. Replace the population
+              model with a real dataset (e.g., NASA SEDAC or WorldPop) and validated blast models if you need higher-fidelity
+              estimates for academic research. I will not assist in building or acquiring weapons.
+            </div>
+          </div>
+        </aside>
+      </main>
+
+      <footer className="p-3 text-xs text-gray-600">
+        Built as an educational demo — use responsibly. For higher fidelity, integrate authoritative
+        population rasters and validated consequence models.
+      </footer>
+    </div>
+  );
+}
